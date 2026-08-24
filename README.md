@@ -2,10 +2,10 @@
 
 Async Python client for the [Drukbox] host API.
 
-The SDK provisions sandbox VMs, reads host state, deletes hosts, and
-returns the SSH connection details a caller needs. It speaks HTTP only:
-SSH sessions, file transfer, command execution, and retry orchestration
-belong in the caller.
+The SDK builds reusable sandbox templates, provisions sandbox VMs, reads host
+state, deletes resources, and returns the SSH connection details a caller
+needs. It speaks HTTP only: SSH sessions, file transfer, command execution,
+and retry orchestration belong in the caller.
 
 ## Install
 
@@ -57,6 +57,7 @@ Public exports live in `drukbox_sdk`:
 
 - `SandboxAPI`
 - `SandboxHost`
+- `SandboxTemplate`
 - `DoctorReport` and `DoctorCheck`
 - `HTTPProxy` and `HTTPProxyAttachment`
 - `SandboxAPIError` and typed subclasses for auth, not found, conflict,
@@ -74,15 +75,26 @@ Supported host operations:
 - `aclose`
 
 `create_host` supports the service's optional `image`, `env`, `expires_at`,
-`provider`, `instance_type`, `disk_gb`, and `Idempotency-Key` inputs.
+`provider`, `instance_type`, `disk_gb`, `template`, and `Idempotency-Key` inputs.
 `instance_type` (provider-native size, e.g. `t3.xlarge` / `cx33`) and `disk_gb`
 pin the VM shape; omit either for the provider default. `expires_at` mirrors the
 wire contract: omit it for the default lease, pass a datetime for an explicit
-expiry, or pass `None` for a never-reaped (permanent) host.
+expiry, or pass `None` for a never-reaped (permanent) host. `template` accepts a
+template ID or `requirements_hash`; an explicit `image` takes precedence.
 
 `renew_host` extends a host's lease via `POST /hosts/{id}/renew`. Omit
 `expires_at` to extend by the service's default TTL; renewal never makes a host
 permanent.
+
+Supported template operations:
+
+- `create_template`
+- `get_template`
+- `list_templates`
+- `delete_template`
+
+`create_template` returns immediately with a building record. Poll
+`get_template` until its status is `available`, or `failed` with `last_error`.
 
 Supported HTTP-proxy operations:
 

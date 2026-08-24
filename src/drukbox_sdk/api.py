@@ -118,6 +118,29 @@ class SandboxHost:
 
 
 @dataclass(frozen=True)
+class SandboxTemplate:
+    """Snapshot of a reusable sandbox template as returned by the service.
+
+    ``status`` moves from ``"building"`` to ``"available"`` or
+    ``"failed"``. While building, ``handle`` is empty; a failed build
+    carries its reason in ``last_error``. ``setup_script`` is intentionally
+    absent because the service never echoes it back.
+    """
+
+    id: str
+    provider: str
+    base_image: str
+    requirements_hash: str
+    label: str
+    handle: str
+    status: str
+    last_error: str
+    created_at: str
+    updated_at: str
+    last_used_at: str | None
+
+
+@dataclass(frozen=True)
 class DoctorCheck:
     """One dependency probe. ``hint`` is a remediation slug, set only on failures."""
 
@@ -224,11 +247,12 @@ class SandboxAPI:
         *,
         disk_gb: int | None = None,
         env: dict[str, str] | None = None,
-        expires_at: datetime | None | _Unset = _UNSET,
+        expires_at: datetime | _Unset | None = _UNSET,
         idempotency_key: str | None = None,
         image: str | None = None,
         instance_type: str | None = None,
         provider: str | None = None,
+        template: str | None = None,
     ) -> SandboxHost:
         """Provision a new host.
 
@@ -247,6 +271,12 @@ class SandboxAPI:
         ``provider`` pins which VM provider serves the request; omit it to
         use the service default. An unknown provider raises
         :class:`SandboxResponseError` (the service rejects it with 400).
+
+        ``template`` names a template by ID or ``requirements_hash``. An
+        explicit ``image`` takes precedence when both are supplied. A
+        template that is not ``available`` raises
+        :class:`SandboxConflictError`; an unknown reference raises
+        :class:`SandboxResponseError`.
 
         ``instance_type`` (provider-native size, e.g. ``t3.xlarge`` /
         ``cx33``) and ``disk_gb`` (root disk size) pin the VM shape; omit
@@ -275,6 +305,8 @@ class SandboxAPI:
             payload["instance_type"] = instance_type
         if provider is not None:
             payload["provider"] = provider
+        if template is not None:
+            payload["template"] = template
 
         headers: dict[str, str] = {}
         if idempotency_key is not None:
@@ -332,6 +364,61 @@ class SandboxAPI:
 
     async def delete_host(self, host_id: uuid.UUID | str) -> None:
         await self._request("DELETE", f"/hosts/{host_id}")
+
+    # ------------------------------------------------------------------
+    # Templates
+    # ------------------------------------------------------------------
+
+    async def create_template(
+        self,
+        *,
+        setup_script: str,
+        provider: str | None = None,
+        base_image: str | None = None,
+        label: str | None = None,
+    ) -> SandboxTemplate:
+        """Start building a reusable template and return immediately.
+
+        The service responds 202 with ``status="building"``. Poll
+        :meth:`get_template` until the status becomes ``"available"`` or
+        ``"failed"``; a failed record carries the reason in ``last_error``.
+        Reposting the same provider, base image, and setup script returns the
+        existing record without rebuilding it.
+        """
+
+        payload: dict[str, Any] = {"setup_script": setup_script}
+        if provider is not None:
+            payload["provider"] = provider
+        if base_image is not None:
+            payload["base_image"] = base_image
+        if label is not None:
+            payload["label"] = label
+
+        data = await self._request("POST", "/templates", json=payload)
+        assert isinstance(data, dict)
+        return SandboxTemplate(**data)
+
+    async def get_template(self, template_id: uuid.UUID | str) -> SandboxTemplate:
+        """Fetch a template build for polling after :meth:`create_template`."""
+
+        data = await self._request("GET", f"/templates/{template_id}")
+        assert isinstance(data, dict)
+        return SandboxTemplate(**data)
+
+    async def list_templates(self) -> list[SandboxTemplate]:
+        """List templates newest first."""
+
+        data = await self._request("GET", "/templates")
+        assert isinstance(data, list)
+        return [SandboxTemplate(**item) for item in data]
+
+    async def delete_template(self, template_id: uuid.UUID | str) -> None:
+        """Delete a template.
+
+        A template still building raises :class:`SandboxConflictError`.
+        """
+
+        await self._request("DELETE", f"/templates/{template_id}")
 
     async def doctor(self) -> DoctorReport:
         """Fetch ``GET /doctor`` — read-only dependency health.

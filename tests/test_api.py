@@ -32,6 +32,7 @@ from drukbox_sdk import (
     SandboxNotFoundError,
     SandboxProvisioningError,
     SandboxResponseError,
+    SandboxTemplate,
     SandboxUnavailableError,
     SandboxValidationError,
 )
@@ -97,6 +98,26 @@ def _host_payload(**overrides: Any) -> dict[str, Any]:
         "updated_at": "2026-05-28T12:00:00+00:00",
         "activated_at": None,
         "expires_at": None,
+    }
+    payload.update(overrides)
+    return payload
+
+
+def _template_payload(**overrides: Any) -> dict[str, Any]:
+    """One canonical template payload used across tests; overrides per case."""
+
+    payload: dict[str, Any] = {
+        "id": str(uuid4()),
+        "provider": "exe",
+        "base_image": "ubuntu-24.04",
+        "requirements_hash": "sha256:abc123",
+        "label": "Python tools",
+        "handle": "",
+        "status": "building",
+        "last_error": "",
+        "created_at": "2026-08-24T12:00:00+00:00",
+        "updated_at": "2026-08-24T12:00:00+00:00",
+        "last_used_at": None,
     }
     payload.update(overrides)
     return payload
@@ -172,6 +193,7 @@ async def test_create_host_omits_image_and_env_when_unset(api: SandboxAPI):
     assert "provider" not in body
     assert "instance_type" not in body
     assert "disk_gb" not in body
+    assert "template" not in body
     assert "Idempotency-Key" not in route.calls.last.request.headers
 
 
@@ -219,6 +241,31 @@ async def test_create_host_sends_provider_when_set(api: SandboxAPI):
 
     assert '"provider":"hetzner"' in route.calls.last.request.content.decode()
     assert host.provider == "hetzner"
+
+
+@respx.mock
+async def test_create_host_sends_template_when_set(api: SandboxAPI):
+    payload = _host_payload()
+    route = respx.post(f"{BASE_URL}/hosts").mock(
+        return_value=httpx.Response(201, json=payload),
+    )
+
+    await api.create_host(template="sha256:abc123")
+
+    assert '"template":"sha256:abc123"' in route.calls.last.request.content.decode()
+
+
+@respx.mock
+async def test_create_host_409_when_template_is_building(api: SandboxAPI):
+    respx.post(f"{BASE_URL}/hosts").mock(
+        return_value=httpx.Response(
+            409,
+            json={"detail": "template is not available (status=building)"},
+        ),
+    )
+
+    with pytest.raises(SandboxConflictError, match="status=building"):
+        await api.create_host(template="sha256:abc123")
 
 
 @respx.mock
@@ -351,6 +398,97 @@ async def test_get_host_returns_none_private_key_after_create(api: SandboxAPI):
     host = await api.get_host(payload["id"])
 
     assert host.private_key is None
+
+
+# ---------------------------------------------------------------------------
+# Templates
+# ---------------------------------------------------------------------------
+
+
+@respx.mock
+async def test_create_template_posts_required_payload_and_returns_building_record(
+    api: SandboxAPI,
+):
+    payload = _template_payload()
+    route = respx.post(f"{BASE_URL}/templates").mock(
+        return_value=httpx.Response(202, json=payload),
+    )
+
+    template = await api.create_template(setup_script="apt-get install -y ripgrep")
+
+    sent = route.calls.last.request
+    assert sent.headers["Authorization"] == "Bearer t-test"
+    assert sent.headers["Accept"] == "application/json"
+    body = sent.content.decode()
+    assert '"setup_script":"apt-get install -y ripgrep"' in body
+    assert "provider" not in body
+    assert "base_image" not in body
+    assert "label" not in body
+    assert isinstance(template, SandboxTemplate)
+    assert template.id == payload["id"]
+    assert template.status == "building"
+    assert template.handle == ""
+    assert template.last_used_at is None
+
+
+@respx.mock
+async def test_get_template_returns_parsed_template(api: SandboxAPI):
+    payload = _template_payload(
+        status="available",
+        handle="template-handle",
+        last_used_at="2026-08-24T12:30:00+00:00",
+    )
+    respx.get(f"{BASE_URL}/templates/{payload['id']}").mock(
+        return_value=httpx.Response(200, json=payload),
+    )
+
+    template = await api.get_template(payload["id"])
+
+    assert template.status == "available"
+    assert template.handle == "template-handle"
+    assert template.last_used_at == payload["last_used_at"]
+
+
+@respx.mock
+async def test_list_templates_parses_records_in_service_order(api: SandboxAPI):
+    payloads = [
+        _template_payload(label="newest"),
+        _template_payload(label="older"),
+    ]
+    respx.get(f"{BASE_URL}/templates").mock(
+        return_value=httpx.Response(200, json=payloads),
+    )
+
+    templates = await api.list_templates()
+
+    assert [template.id for template in templates] == [payload["id"] for payload in payloads]
+    assert [template.label for template in templates] == ["newest", "older"]
+
+
+@respx.mock
+async def test_delete_template_swallows_204(api: SandboxAPI):
+    template_id = uuid4()
+    route = respx.delete(f"{BASE_URL}/templates/{template_id}").mock(
+        return_value=httpx.Response(204),
+    )
+
+    await api.delete_template(template_id)
+
+    assert route.called
+
+
+@respx.mock
+async def test_delete_template_409_while_building(api: SandboxAPI):
+    template_id = uuid4()
+    respx.delete(f"{BASE_URL}/templates/{template_id}").mock(
+        return_value=httpx.Response(
+            409,
+            json={"detail": "TEMPLATE_STATE: template is still building"},
+        ),
+    )
+
+    with pytest.raises(SandboxConflictError, match="TEMPLATE_STATE"):
+        await api.delete_template(template_id)
 
 
 # ---------------------------------------------------------------------------
