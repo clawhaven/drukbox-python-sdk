@@ -80,7 +80,7 @@ Supported host operations:
 pin the VM shape; omit either for the provider default. `expires_at` mirrors the
 wire contract: omit it for the default lease, pass a datetime for an explicit
 expiry, or pass `None` for a never-reaped (permanent) host. `template` accepts a
-template ID or `requirements_hash`. An explicit `image` wins over it.
+template ID. An explicit `image` wins over it.
 
 `renew_host` extends a host's lease via `POST /hosts/{id}/renew`. Omit
 `expires_at` to extend by the service's default TTL; renewal never makes a host

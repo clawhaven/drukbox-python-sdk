@@ -250,9 +250,10 @@ async def test_create_host_sends_template_when_set(api: SandboxAPI):
         return_value=httpx.Response(201, json=payload),
     )
 
-    await api.create_host(template="sha256:abc123")
+    template_id = uuid4()
+    await api.create_host(template=template_id)
 
-    assert '"template":"sha256:abc123"' in route.calls.last.request.content.decode()
+    assert f'"template":"{template_id}"' in route.calls.last.request.content.decode()
 
 
 @respx.mock

@@ -252,7 +252,7 @@ class SandboxAPI:
         image: str | None = None,
         instance_type: str | None = None,
         provider: str | None = None,
-        template: str | None = None,
+        template: uuid.UUID | str | None = None,
     ) -> SandboxHost:
         """Provision a new host.
 
@@ -272,10 +272,11 @@ class SandboxAPI:
         use the service default. An unknown provider raises
         :class:`SandboxResponseError` (the service rejects it with 400).
 
-        ``template`` names a template by ID or ``requirements_hash``. An
-        explicit ``image`` wins when you pass both. A template that is
-        not ``available`` raises :class:`SandboxConflictError`. An
-        unknown reference raises :class:`SandboxResponseError`.
+        ``template`` names a template by its ID, from
+        :meth:`create_template` or :meth:`get_template`. An explicit
+        ``image`` wins when you pass both. A template that is not
+        ``available`` raises :class:`SandboxConflictError`. An unknown
+        ID raises :class:`SandboxResponseError`.
 
         ``instance_type`` (provider-native size, e.g. ``t3.xlarge`` /
         ``cx33``) and ``disk_gb`` (root disk size) pin the VM shape; omit
@@ -305,7 +306,7 @@ class SandboxAPI:
         if provider is not None:
             payload["provider"] = provider
         if template is not None:
-            payload["template"] = template
+            payload["template"] = str(template)
 
         headers: dict[str, str] = {}
         if idempotency_key is not None:
