@@ -122,9 +122,9 @@ class SandboxTemplate:
     """Snapshot of a reusable sandbox template as returned by the service.
 
     ``status`` moves from ``"building"`` to ``"available"`` or
-    ``"failed"``. While building, ``handle`` is empty; a failed build
-    carries its reason in ``last_error``. ``setup_script`` is intentionally
-    absent because the service never echoes it back.
+    ``"failed"``. While the build runs, ``handle`` is empty. A failed
+    build carries its reason in ``last_error``. The record has no
+    ``setup_script`` because the service never echoes it back.
     """
 
     id: str
@@ -273,10 +273,9 @@ class SandboxAPI:
         :class:`SandboxResponseError` (the service rejects it with 400).
 
         ``template`` names a template by ID or ``requirements_hash``. An
-        explicit ``image`` takes precedence when both are supplied. A
-        template that is not ``available`` raises
-        :class:`SandboxConflictError`; an unknown reference raises
-        :class:`SandboxResponseError`.
+        explicit ``image`` wins when you pass both. A template that is
+        not ``available`` raises :class:`SandboxConflictError`. An
+        unknown reference raises :class:`SandboxResponseError`.
 
         ``instance_type`` (provider-native size, e.g. ``t3.xlarge`` /
         ``cx33``) and ``disk_gb`` (root disk size) pin the VM shape; omit
@@ -377,13 +376,14 @@ class SandboxAPI:
         base_image: str | None = None,
         label: str | None = None,
     ) -> SandboxTemplate:
-        """Start building a reusable template and return immediately.
+        """Start a template build and return immediately.
 
         The service responds 202 with ``status="building"``. Poll
         :meth:`get_template` until the status becomes ``"available"`` or
-        ``"failed"``; a failed record carries the reason in ``last_error``.
-        Reposting the same provider, base image, and setup script returns the
-        existing record without rebuilding it.
+        ``"failed"``. A failed record carries the reason in
+        ``last_error``. A repeated post with the same provider, base
+        image, and setup script returns the existing record without a
+        rebuild.
         """
 
         payload: dict[str, Any] = {"setup_script": setup_script}
@@ -399,7 +399,7 @@ class SandboxAPI:
         return SandboxTemplate(**data)
 
     async def get_template(self, template_id: uuid.UUID | str) -> SandboxTemplate:
-        """Fetch a template build for polling after :meth:`create_template`."""
+        """Fetch one template. Callers poll this after :meth:`create_template`."""
 
         data = await self._request("GET", f"/templates/{template_id}")
         assert isinstance(data, dict)
@@ -415,7 +415,8 @@ class SandboxAPI:
     async def delete_template(self, template_id: uuid.UUID | str) -> None:
         """Delete a template.
 
-        A template still building raises :class:`SandboxConflictError`.
+        A template whose status is ``building`` raises
+        :class:`SandboxConflictError`.
         """
 
         await self._request("DELETE", f"/templates/{template_id}")

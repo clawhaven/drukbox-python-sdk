@@ -3,9 +3,9 @@
 Async Python client for the [Drukbox] host API.
 
 The SDK builds reusable sandbox templates, provisions sandbox VMs, reads host
-state, deletes resources, and returns the SSH connection details a caller
-needs. It speaks HTTP only: SSH sessions, file transfer, command execution,
-and retry orchestration belong in the caller.
+state, deletes hosts and templates, and returns the SSH connection details a
+caller needs. It speaks HTTP only: SSH sessions, file transfer, command
+execution, and retry orchestration belong in the caller.
 
 ## Install
 
@@ -80,7 +80,7 @@ Supported host operations:
 pin the VM shape; omit either for the provider default. `expires_at` mirrors the
 wire contract: omit it for the default lease, pass a datetime for an explicit
 expiry, or pass `None` for a never-reaped (permanent) host. `template` accepts a
-template ID or `requirements_hash`; an explicit `image` takes precedence.
+template ID or `requirements_hash`. An explicit `image` wins over it.
 
 `renew_host` extends a host's lease via `POST /hosts/{id}/renew`. Omit
 `expires_at` to extend by the service's default TTL; renewal never makes a host
@@ -93,8 +93,9 @@ Supported template operations:
 - `list_templates`
 - `delete_template`
 
-`create_template` returns immediately with a building record. Poll
-`get_template` until its status is `available`, or `failed` with `last_error`.
+`create_template` returns immediately with a `building` record. Poll
+`get_template` until the status is `available` or `failed`. A failed record
+carries the reason in `last_error`.
 
 Supported HTTP-proxy operations:
 

@@ -104,7 +104,7 @@ def _host_payload(**overrides: Any) -> dict[str, Any]:
 
 
 def _template_payload(**overrides: Any) -> dict[str, Any]:
-    """One canonical template payload used across tests; overrides per case."""
+    """One canonical template payload used across tests. Each case overrides fields."""
 
     payload: dict[str, Any] = {
         "id": str(uuid4()),
