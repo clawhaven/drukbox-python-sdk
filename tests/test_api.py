@@ -110,7 +110,7 @@ def _template_payload(**overrides: Any) -> dict[str, Any]:
         "id": str(uuid4()),
         "provider": "exe",
         "base_image": "ubuntu-24.04",
-        "requirements_hash": "sha256:abc123",
+        "setup_script_hash": "sha256:abc123",
         "label": "Python tools",
         "image": "",
         "status": "building",
