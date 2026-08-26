@@ -110,7 +110,7 @@ def _template_payload(**overrides: Any) -> dict[str, Any]:
         "id": str(uuid4()),
         "provider": "exe",
         "base_image": "ubuntu-24.04",
-        "setup_script_hash": "sha256:abc123",
+        "setup_script_hash": "ab12" * 16,
         "label": "Python tools",
         "image": "",
         "status": "building",
@@ -258,15 +258,16 @@ async def test_create_host_sends_template_when_set(api: SandboxAPI):
 
 @respx.mock
 async def test_create_host_409_when_template_is_building(api: SandboxAPI):
+    template_id = uuid4()
     respx.post(f"{BASE_URL}/hosts").mock(
         return_value=httpx.Response(
             409,
-            json={"detail": "template is not available (status=building)"},
+            json={"detail": f"template {template_id} is building"},
         ),
     )
 
-    with pytest.raises(SandboxConflictError, match="status=building"):
-        await api.create_host(template="sha256:abc123")
+    with pytest.raises(SandboxConflictError, match="is building"):
+        await api.create_host(template=template_id)
 
 
 @respx.mock
