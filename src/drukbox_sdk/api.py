@@ -26,10 +26,18 @@ Usage::
         await sandbox.delete_host(host.id)
         await sandbox.aclose()
 
+Templates bake a setup script into a reusable image; hosts fork from it::
+
+    template = await sandbox.create_template(setup_script=script)
+    while template.status == "building":
+        template = await sandbox.get_template(template.id)
+    host = await sandbox.create_host(template=template.id)
+
 For env-backed config use :meth:`SandboxAPI.from_env`.
 """
 
 import asyncio
+import enum
 import os
 import uuid
 from dataclasses import dataclass
@@ -58,7 +66,7 @@ _SANDBOX_HTTP_LIMITS = httpx.Limits(
 )
 
 
-class _Unset:
+class _Unset(enum.Enum):
     """Sentinel distinguishing an omitted argument from an explicit ``None``.
 
     ``create_host`` mirrors the service's tri-state ``expires_at``: an
@@ -67,11 +75,13 @@ class _Unset:
     apart, so the omitted case uses this sentinel.
     """
 
+    UNSET = enum.auto()
+
     def __repr__(self) -> str:
         return "UNSET"
 
 
-_UNSET = _Unset()
+_UNSET = _Unset.UNSET
 
 
 @dataclass(frozen=True)
@@ -238,10 +248,6 @@ class SandboxAPI:
         timeout = float(os.environ.get(f"{prefix}SERVICE_TIMEOUT", "300"))
         return cls(base_url=url, token=token, timeout=timeout)
 
-    # ------------------------------------------------------------------
-    # Host lifecycle
-    # ------------------------------------------------------------------
-
     async def create_host(
         self,
         *,
@@ -295,9 +301,7 @@ class SandboxAPI:
             payload["disk_gb"] = disk_gb
         if env is not None:
             payload["env"] = env
-        # Sentinel default lets us tell "caller omitted expires_at" (default
-        # lease) from "caller passed None" (explicit null → permanent host).
-        if not isinstance(expires_at, _Unset):
+        if expires_at is not _UNSET:
             payload["expires_at"] = None if expires_at is None else expires_at.isoformat()
         if image is not None:
             payload["image"] = image
@@ -313,13 +317,10 @@ class SandboxAPI:
             headers["Idempotency-Key"] = idempotency_key
 
         data = await self._request("POST", "/hosts", json=payload, headers=headers)
-        assert isinstance(data, dict)
         return SandboxHost(**data)
 
     async def get_host(self, host_id: uuid.UUID | str) -> SandboxHost:
-        data = await self._request("GET", f"/hosts/{host_id}")
-        assert isinstance(data, dict)
-        return SandboxHost(**data)
+        return SandboxHost(**await self._request("GET", f"/hosts/{host_id}"))
 
     async def attach(self, host_id: uuid.UUID | str) -> SandboxHost:
         """Alias for :meth:`get_host` that reads better at call sites
@@ -334,9 +335,7 @@ class SandboxAPI:
         return await self.get_host(host_id)
 
     async def list_hosts(self) -> list[SandboxHost]:
-        data = await self._request("GET", "/hosts")
-        assert isinstance(data, list)
-        return [SandboxHost(**item) for item in data]
+        return [SandboxHost(**item) for item in await self._request("GET", "/hosts")]
 
     async def renew_host(
         self,
@@ -358,16 +357,10 @@ class SandboxAPI:
         payload: dict[str, Any] = {}
         if expires_at is not None:
             payload["expires_at"] = expires_at.isoformat()
-        data = await self._request("POST", f"/hosts/{host_id}/renew", json=payload)
-        assert isinstance(data, dict)
-        return SandboxHost(**data)
+        return SandboxHost(**await self._request("POST", f"/hosts/{host_id}/renew", json=payload))
 
     async def delete_host(self, host_id: uuid.UUID | str) -> None:
         await self._request("DELETE", f"/hosts/{host_id}")
-
-    # ------------------------------------------------------------------
-    # Templates
-    # ------------------------------------------------------------------
 
     async def create_template(
         self,
@@ -395,23 +388,17 @@ class SandboxAPI:
         if label is not None:
             payload["label"] = label
 
-        data = await self._request("POST", "/templates", json=payload)
-        assert isinstance(data, dict)
-        return SandboxTemplate(**data)
+        return SandboxTemplate(**await self._request("POST", "/templates", json=payload))
 
     async def get_template(self, template_id: uuid.UUID | str) -> SandboxTemplate:
         """Fetch one template. Callers poll this after :meth:`create_template`."""
 
-        data = await self._request("GET", f"/templates/{template_id}")
-        assert isinstance(data, dict)
-        return SandboxTemplate(**data)
+        return SandboxTemplate(**await self._request("GET", f"/templates/{template_id}"))
 
     async def list_templates(self) -> list[SandboxTemplate]:
         """List templates newest first."""
 
-        data = await self._request("GET", "/templates")
-        assert isinstance(data, list)
-        return [SandboxTemplate(**item) for item in data]
+        return [SandboxTemplate(**item) for item in await self._request("GET", "/templates")]
 
     async def delete_template(self, template_id: uuid.UUID | str) -> None:
         """Delete a template.
@@ -430,17 +417,12 @@ class SandboxAPI:
         """
 
         data = await self._request("GET", "/doctor")
-        assert isinstance(data, dict)
         return DoctorReport(
             ok=data["ok"],
             active_provider=data["active_provider"],
             tailscale_enabled=data["tailscale_enabled"],
             checks=[DoctorCheck(**check) for check in data["checks"]],
         )
-
-    # ------------------------------------------------------------------
-    # HTTP proxies
-    # ------------------------------------------------------------------
 
     async def create_http_proxy(
         self,
@@ -459,9 +441,7 @@ class SandboxAPI:
         """
 
         payload: dict[str, Any] = {"name": name, "target": target, "headers": headers}
-        data = await self._request("POST", "/http-proxies", json=payload)
-        assert isinstance(data, dict)
-        return HTTPProxy(**data)
+        return HTTPProxy(**await self._request("POST", "/http-proxies", json=payload))
 
     async def delete_http_proxy(self, name: str) -> None:
         """Delete an HTTP proxy by name. Unknown name raises
@@ -482,7 +462,6 @@ class SandboxAPI:
         """
 
         data = await self._request("POST", f"/http-proxies/{name}/hosts/{host_id}")
-        assert isinstance(data, dict)
         return HTTPProxyAttachment(**data)
 
     async def detach_http_proxy(self, name: str, host_id: uuid.UUID | str) -> None:
@@ -492,15 +471,10 @@ class SandboxAPI:
         await self._request("DELETE", f"/http-proxies/{name}/hosts/{host_id}")
 
     async def aclose(self) -> None:
-        if self._client is None:
-            return
-        await self._client.aclose()
-        self._client = None
-        self._client_loop = None
-
-    # ------------------------------------------------------------------
-    # Internals
-    # ------------------------------------------------------------------
+        if self._client:
+            await self._client.aclose()
+            self._client = None
+            self._client_loop = None
 
     async def _request(
         self,
@@ -509,13 +483,13 @@ class SandboxAPI:
         *,
         headers: dict[str, str] | None = None,
         json: dict[str, Any] | None = None,
-    ) -> dict[str, Any] | list[Any]:
+    ) -> Any:
         client = await self._get_client()
         request_headers = {
             "Authorization": f"Bearer {self.token}",
             "Accept": "application/json",
         }
-        if headers is not None:
+        if headers:
             request_headers.update(headers)
 
         try:
@@ -555,9 +529,8 @@ class SandboxAPI:
         if response.status_code == 422:
             # FastAPI's 422 detail is a list of error dicts; join the messages
             # so it reads as a line, not a raw list repr.
-            detail = json_response.get("detail", "validation error")
-            if isinstance(detail, list):
-                detail = "; ".join(item.get("msg", "") for item in detail) or "validation error"
+            errors = json_response.get("detail") or []
+            detail = "; ".join(error.get("msg", "") for error in errors) or "validation error"
             raise SandboxValidationError(detail)
 
         if response.status_code >= 400:
@@ -566,20 +539,16 @@ class SandboxAPI:
 
     async def _get_client(self) -> httpx.AsyncClient:
         running_loop = asyncio.get_running_loop()
-        # Fast-path: client exists and is bound to the current loop.
-        if self._client is not None and self._client_loop is running_loop:
+        if self._client and self._client_loop is running_loop:
             return self._client
-        # Slow-path: either no client yet, or the client is bound to a
-        # stale loop (e.g. fixture teardown). Serialize through the
-        # lock.
-        if self._client_lock is None:
+        if not self._client_lock:
             self._client_lock = asyncio.Lock()
         async with self._client_lock:
             # Re-check under the lock; another coroutine may have raced
             # ahead.
-            if self._client is not None and self._client_loop is running_loop:
+            if self._client and self._client_loop is running_loop:
                 return self._client
-            if self._client is not None:
+            if self._client:
                 # Stale-loop client: closing on its own loop is unsafe,
                 # so drop the reference and rely on GC. httpx will emit
                 # an "unclosed client" warning, which is the correct
