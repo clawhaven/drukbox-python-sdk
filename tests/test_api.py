@@ -112,7 +112,7 @@ def _template_payload(**overrides: Any) -> dict[str, Any]:
         "base_image": "ubuntu-24.04",
         "requirements_hash": "sha256:abc123",
         "label": "Python tools",
-        "handle": "",
+        "image": "",
         "status": "building",
         "last_error": "",
         "created_at": "2026-08-24T12:00:00+00:00",
@@ -428,7 +428,7 @@ async def test_create_template_posts_required_payload_and_returns_building_recor
     assert isinstance(template, SandboxTemplate)
     assert template.id == payload["id"]
     assert template.status == "building"
-    assert template.handle == ""
+    assert template.image == ""
     assert template.last_used_at is None
 
 
@@ -436,7 +436,7 @@ async def test_create_template_posts_required_payload_and_returns_building_recor
 async def test_get_template_returns_parsed_template(api: SandboxAPI):
     payload = _template_payload(
         status="available",
-        handle="template-handle",
+        image="derived:image",
         last_used_at="2026-08-24T12:30:00+00:00",
     )
     respx.get(f"{BASE_URL}/templates/{payload['id']}").mock(
@@ -446,7 +446,7 @@ async def test_get_template_returns_parsed_template(api: SandboxAPI):
     template = await api.get_template(payload["id"])
 
     assert template.status == "available"
-    assert template.handle == "template-handle"
+    assert template.image == "derived:image"
     assert template.last_used_at == payload["last_used_at"]
 
 

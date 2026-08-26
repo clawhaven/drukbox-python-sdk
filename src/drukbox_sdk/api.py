@@ -122,7 +122,7 @@ class SandboxTemplate:
     """Snapshot of a reusable sandbox template as returned by the service.
 
     ``status`` moves from ``"building"`` to ``"available"`` or
-    ``"failed"``. While the build runs, ``handle`` is empty. A failed
+    ``"failed"``. While the build runs, ``image`` is empty. A failed
     build carries its reason in ``last_error``. The record has no
     ``setup_script`` because the service never echoes it back.
     """
@@ -132,7 +132,7 @@ class SandboxTemplate:
     base_image: str
     requirements_hash: str
     label: str
-    handle: str
+    image: str
     status: str
     last_error: str
     created_at: str
