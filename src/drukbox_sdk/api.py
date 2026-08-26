@@ -37,7 +37,6 @@ For env-backed config use :meth:`SandboxAPI.from_env`.
 """
 
 import asyncio
-import enum
 import os
 import uuid
 from dataclasses import dataclass
@@ -64,24 +63,6 @@ _SANDBOX_HTTP_LIMITS = httpx.Limits(
     max_connections=20,
     max_keepalive_connections=5,
 )
-
-
-class _Unset(enum.Enum):
-    """Sentinel distinguishing an omitted argument from an explicit ``None``.
-
-    ``create_host`` mirrors the service's tri-state ``expires_at``: an
-    omitted field means "default lease", an explicit ``null`` means
-    "permanent". A plain ``datetime | None`` default can't tell those two
-    apart, so the omitted case uses this sentinel.
-    """
-
-    UNSET = enum.auto()
-
-    def __repr__(self) -> str:
-        return "UNSET"
-
-
-_UNSET = _Unset.UNSET
 
 
 @dataclass(frozen=True)
@@ -253,10 +234,11 @@ class SandboxAPI:
         *,
         disk_gb: int | None = None,
         env: dict[str, str] | None = None,
-        expires_at: datetime | _Unset | None = _UNSET,
+        expires_at: datetime | None = None,
         idempotency_key: str | None = None,
         image: str | None = None,
         instance_type: str | None = None,
+        permanent: bool = False,
         provider: str | None = None,
         template: uuid.UUID | str | None = None,
     ) -> SandboxHost:
@@ -289,20 +271,24 @@ class SandboxAPI:
         either to use the provider's configured default. A size the active
         provider can't serve raises :class:`SandboxResponseError` (400).
 
-        Lease (mirrors the wire contract's tri-state ``expires_at``): omit
-        it for the service's default lease, pass a ``datetime`` for an
-        explicit expiry, or pass ``None`` for a never-reaped (permanent)
-        host — exactly as an omitted field vs. an explicit ``null`` behave
-        on the API.
+        Lease: omit ``expires_at`` for the service's default lease, pass a
+        ``datetime`` for an explicit expiry, or pass ``permanent=True`` for
+        a host the janitor never reaps.
         """
+
+        if expires_at and permanent:
+            raise ValueError("a permanent host cannot carry an expires_at")
 
         payload: dict[str, Any] = {}
         if disk_gb is not None:
             payload["disk_gb"] = disk_gb
         if env is not None:
             payload["env"] = env
-        if expires_at is not _UNSET:
-            payload["expires_at"] = None if expires_at is None else expires_at.isoformat()
+        if expires_at:
+            payload["expires_at"] = expires_at.isoformat()
+        if permanent:
+            # An explicit null on the wire is the opt-out from expiry.
+            payload["expires_at"] = None
         if image is not None:
             payload["image"] = image
         if instance_type is not None:
@@ -320,7 +306,8 @@ class SandboxAPI:
         return SandboxHost(**data)
 
     async def get_host(self, host_id: uuid.UUID | str) -> SandboxHost:
-        return SandboxHost(**await self._request("GET", f"/hosts/{host_id}"))
+        data = await self._request("GET", f"/hosts/{host_id}")
+        return SandboxHost(**data)
 
     async def attach(self, host_id: uuid.UUID | str) -> SandboxHost:
         """Alias for :meth:`get_host` that reads better at call sites
@@ -335,7 +322,8 @@ class SandboxAPI:
         return await self.get_host(host_id)
 
     async def list_hosts(self) -> list[SandboxHost]:
-        return [SandboxHost(**item) for item in await self._request("GET", "/hosts")]
+        data = await self._request("GET", "/hosts")
+        return [SandboxHost(**item) for item in data]
 
     async def renew_host(
         self,
@@ -357,7 +345,8 @@ class SandboxAPI:
         payload: dict[str, Any] = {}
         if expires_at is not None:
             payload["expires_at"] = expires_at.isoformat()
-        return SandboxHost(**await self._request("POST", f"/hosts/{host_id}/renew", json=payload))
+        data = await self._request("POST", f"/hosts/{host_id}/renew", json=payload)
+        return SandboxHost(**data)
 
     async def delete_host(self, host_id: uuid.UUID | str) -> None:
         await self._request("DELETE", f"/hosts/{host_id}")
@@ -388,17 +377,20 @@ class SandboxAPI:
         if label is not None:
             payload["label"] = label
 
-        return SandboxTemplate(**await self._request("POST", "/templates", json=payload))
+        data = await self._request("POST", "/templates", json=payload)
+        return SandboxTemplate(**data)
 
     async def get_template(self, template_id: uuid.UUID | str) -> SandboxTemplate:
         """Fetch one template. Callers poll this after :meth:`create_template`."""
 
-        return SandboxTemplate(**await self._request("GET", f"/templates/{template_id}"))
+        data = await self._request("GET", f"/templates/{template_id}")
+        return SandboxTemplate(**data)
 
     async def list_templates(self) -> list[SandboxTemplate]:
         """List templates newest first."""
 
-        return [SandboxTemplate(**item) for item in await self._request("GET", "/templates")]
+        data = await self._request("GET", "/templates")
+        return [SandboxTemplate(**item) for item in data]
 
     async def delete_template(self, template_id: uuid.UUID | str) -> None:
         """Delete a template.
@@ -441,7 +433,8 @@ class SandboxAPI:
         """
 
         payload: dict[str, Any] = {"name": name, "target": target, "headers": headers}
-        return HTTPProxy(**await self._request("POST", "/http-proxies", json=payload))
+        data = await self._request("POST", "/http-proxies", json=payload)
+        return HTTPProxy(**data)
 
     async def delete_http_proxy(self, name: str) -> None:
         """Delete an HTTP proxy by name. Unknown name raises

@@ -189,9 +189,8 @@ async def test_create_host_omits_image_and_env_when_unset(api: SandboxAPI):
 
 
 @respx.mock
-async def test_create_host_none_expires_at_sends_explicit_null(api: SandboxAPI):
-    """Mirroring the wire contract: an explicit ``expires_at=None`` asks for
-    a permanent (never-reaped) host and must serialize as
+async def test_create_host_permanent_sends_explicit_null(api: SandboxAPI):
+    """``permanent=True`` opts out of expiry as the wire's explicit
     ``"expires_at":null`` — distinct from omitting it (default lease),
     covered by test_create_host_omits_image_and_env_when_unset."""
 
@@ -200,9 +199,17 @@ async def test_create_host_none_expires_at_sends_explicit_null(api: SandboxAPI):
         return_value=httpx.Response(201, json=payload),
     )
 
-    await api.create_host(expires_at=None)
+    await api.create_host(permanent=True)
 
     assert '"expires_at":null' in route.calls.last.request.content.decode()
+
+
+async def test_create_host_rejects_permanent_with_expires_at(api: SandboxAPI):
+    with pytest.raises(ValueError, match="permanent"):
+        await api.create_host(
+            permanent=True,
+            expires_at=datetime(2026, 9, 1, tzinfo=UTC),
+        )
 
 
 @respx.mock

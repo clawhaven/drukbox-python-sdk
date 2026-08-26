@@ -75,12 +75,12 @@ Supported host operations:
 - `aclose`
 
 `create_host` supports the service's optional `image`, `env`, `expires_at`,
-`provider`, `instance_type`, `disk_gb`, `template`, and `Idempotency-Key` inputs.
-`instance_type` (provider-native size, e.g. `t3.xlarge` / `cx33`) and `disk_gb`
-pin the VM shape; omit either for the provider default. `expires_at` mirrors the
-wire contract: omit it for the default lease, pass a datetime for an explicit
-expiry, or pass `None` for a never-reaped (permanent) host. `template` accepts a
-template ID. An explicit `image` wins over it.
+`permanent`, `provider`, `instance_type`, `disk_gb`, `template`, and
+`Idempotency-Key` inputs. `instance_type` (provider-native size, e.g.
+`t3.xlarge` / `cx33`) and `disk_gb` pin the VM shape; omit either for the
+provider default. Omit `expires_at` for the default lease, pass a datetime for
+an explicit expiry, or pass `permanent=True` for a never-reaped host.
+`template` accepts a template ID. An explicit `image` wins over it.
 
 `renew_host` extends a host's lease via `POST /hosts/{id}/renew`. Omit
 `expires_at` to extend by the service's default TTL; renewal never makes a host
