@@ -22,13 +22,11 @@ import pytest
 import respx
 
 from drukbox_sdk import (
-    DoctorReport,
     HTTPProxy,
     HTTPProxyAttachment,
     SandboxAPI,
     SandboxAuthError,
     SandboxConflictError,
-    SandboxHost,
     SandboxNotFoundError,
     SandboxProvisioningError,
     SandboxResponseError,
@@ -102,6 +100,26 @@ def _host_payload(**overrides: Any) -> dict[str, Any]:
     return payload
 
 
+def _template_payload(**overrides: Any) -> dict[str, Any]:
+    """One canonical template payload used across tests. Each case overrides fields."""
+
+    payload: dict[str, Any] = {
+        "id": str(uuid4()),
+        "provider": "exe",
+        "base_image": "ubuntu-24.04",
+        "setup_script_hash": "ab12" * 16,
+        "label": "Python tools",
+        "image": "",
+        "status": "building",
+        "last_error": "",
+        "created_at": "2026-08-24T12:00:00+00:00",
+        "updated_at": "2026-08-24T12:00:00+00:00",
+        "last_used_at": None,
+    }
+    payload.update(overrides)
+    return payload
+
+
 @pytest.fixture
 async def api() -> AsyncGenerator[SandboxAPI, None]:
     """Fresh SandboxAPI per test. Closed via finalizer."""
@@ -109,11 +127,6 @@ async def api() -> AsyncGenerator[SandboxAPI, None]:
     client = SandboxAPI(base_url=BASE_URL, token="t-test", timeout=5.0)
     yield client
     await client.aclose()
-
-
-# ---------------------------------------------------------------------------
-# Happy paths
-# ---------------------------------------------------------------------------
 
 
 @respx.mock
@@ -141,7 +154,6 @@ async def test_create_host_posts_payload_and_returns_parsed_host(api: SandboxAPI
     assert '"env":{"FOO":"bar"}' in body
     assert f'"expires_at":"{expires_at.isoformat()}"' in body
 
-    assert isinstance(host, SandboxHost)
     assert host.id == payload["id"]
     assert host.external_ssh_host == payload["external_ssh_host"]
     assert host.external_ssh_port == payload["external_ssh_port"]
@@ -172,13 +184,13 @@ async def test_create_host_omits_image_and_env_when_unset(api: SandboxAPI):
     assert "provider" not in body
     assert "instance_type" not in body
     assert "disk_gb" not in body
+    assert "template" not in body
     assert "Idempotency-Key" not in route.calls.last.request.headers
 
 
 @respx.mock
-async def test_create_host_none_expires_at_sends_explicit_null(api: SandboxAPI):
-    """Mirroring the wire contract: an explicit ``expires_at=None`` asks for
-    a permanent (never-reaped) host and must serialize as
+async def test_create_host_permanent_sends_explicit_null(api: SandboxAPI):
+    """``permanent=True`` opts out of expiry as the wire's explicit
     ``"expires_at":null`` — distinct from omitting it (default lease),
     covered by test_create_host_omits_image_and_env_when_unset."""
 
@@ -187,9 +199,17 @@ async def test_create_host_none_expires_at_sends_explicit_null(api: SandboxAPI):
         return_value=httpx.Response(201, json=payload),
     )
 
-    await api.create_host(expires_at=None)
+    await api.create_host(permanent=True)
 
     assert '"expires_at":null' in route.calls.last.request.content.decode()
+
+
+async def test_create_host_rejects_permanent_with_expires_at(api: SandboxAPI):
+    with pytest.raises(ValueError, match="permanent"):
+        await api.create_host(
+            permanent=True,
+            expires_at=datetime(2026, 9, 1, tzinfo=UTC),
+        )
 
 
 @respx.mock
@@ -219,6 +239,33 @@ async def test_create_host_sends_provider_when_set(api: SandboxAPI):
 
     assert '"provider":"hetzner"' in route.calls.last.request.content.decode()
     assert host.provider == "hetzner"
+
+
+@respx.mock
+async def test_create_host_sends_template_when_set(api: SandboxAPI):
+    payload = _host_payload()
+    route = respx.post(f"{BASE_URL}/hosts").mock(
+        return_value=httpx.Response(201, json=payload),
+    )
+
+    template_id = uuid4()
+    await api.create_host(template=template_id)
+
+    assert f'"template":"{template_id}"' in route.calls.last.request.content.decode()
+
+
+@respx.mock
+async def test_create_host_409_when_template_is_building(api: SandboxAPI):
+    template_id = uuid4()
+    respx.post(f"{BASE_URL}/hosts").mock(
+        return_value=httpx.Response(
+            409,
+            json={"detail": f"template {template_id} is building"},
+        ),
+    )
+
+    with pytest.raises(SandboxConflictError, match="is building"):
+        await api.create_host(template=template_id)
 
 
 @respx.mock
@@ -353,9 +400,89 @@ async def test_get_host_returns_none_private_key_after_create(api: SandboxAPI):
     assert host.private_key is None
 
 
-# ---------------------------------------------------------------------------
-# Error classification
-# ---------------------------------------------------------------------------
+@respx.mock
+async def test_create_template_posts_required_payload_and_returns_building_record(
+    api: SandboxAPI,
+):
+    payload = _template_payload()
+    route = respx.post(f"{BASE_URL}/templates").mock(
+        return_value=httpx.Response(202, json=payload),
+    )
+
+    template = await api.create_template(setup_script="apt-get install -y ripgrep")
+
+    sent = route.calls.last.request
+    assert sent.headers["Authorization"] == "Bearer t-test"
+    assert sent.headers["Accept"] == "application/json"
+    body = sent.content.decode()
+    assert '"setup_script":"apt-get install -y ripgrep"' in body
+    assert "provider" not in body
+    assert "base_image" not in body
+    assert "label" not in body
+    assert template.id == payload["id"]
+    assert template.status == "building"
+    assert template.image == ""
+    assert template.last_used_at is None
+
+
+@respx.mock
+async def test_get_template_returns_parsed_template(api: SandboxAPI):
+    payload = _template_payload(
+        status="available",
+        image="derived:image",
+        last_used_at="2026-08-24T12:30:00+00:00",
+    )
+    respx.get(f"{BASE_URL}/templates/{payload['id']}").mock(
+        return_value=httpx.Response(200, json=payload),
+    )
+
+    template = await api.get_template(payload["id"])
+
+    assert template.status == "available"
+    assert template.image == "derived:image"
+    assert template.last_used_at == payload["last_used_at"]
+
+
+@respx.mock
+async def test_list_templates_parses_records_in_service_order(api: SandboxAPI):
+    payloads = [
+        _template_payload(label="newest"),
+        _template_payload(label="older"),
+    ]
+    respx.get(f"{BASE_URL}/templates").mock(
+        return_value=httpx.Response(200, json=payloads),
+    )
+
+    templates = await api.list_templates()
+
+    assert [template.id for template in templates] == [payload["id"] for payload in payloads]
+    assert [template.label for template in templates] == ["newest", "older"]
+
+
+@respx.mock
+async def test_delete_template_swallows_204(api: SandboxAPI):
+    template_id = uuid4()
+    route = respx.delete(f"{BASE_URL}/templates/{template_id}").mock(
+        return_value=httpx.Response(204),
+    )
+
+    await api.delete_template(template_id)
+
+    assert route.called
+
+
+@respx.mock
+async def test_delete_template_409_while_building(api: SandboxAPI):
+    template_id = uuid4()
+    respx.delete(f"{BASE_URL}/templates/{template_id}").mock(
+        return_value=httpx.Response(
+            409,
+            json={"detail": "TEMPLATE_STATE: template is still building"},
+        ),
+    )
+
+    with pytest.raises(SandboxConflictError, match="TEMPLATE_STATE"):
+        await api.delete_template(template_id)
 
 
 @respx.mock
@@ -502,11 +629,6 @@ async def test_error_detail_absent_uses_fallback_message(api: SandboxAPI):
         await api.list_hosts()
 
 
-# ---------------------------------------------------------------------------
-# Lifecycle + loop affinity
-# ---------------------------------------------------------------------------
-
-
 @respx.mock
 async def test_aclose_drops_client_and_is_idempotent(api: SandboxAPI):
     respx.get(f"{BASE_URL}/hosts").mock(return_value=httpx.Response(200, json=[]))
@@ -551,11 +673,6 @@ def test_cross_loop_reuse_rebinds_client_without_crashing():
     # Two distinct loop objects — the SDK rebound on the second
     # invocation rather than reusing a stale (closed) loop.
     assert bound_loops[0] is not bound_loops[1]
-
-
-# ---------------------------------------------------------------------------
-# from_env
-# ---------------------------------------------------------------------------
 
 
 def test_from_env_reads_prefixed_vars(monkeypatch: pytest.MonkeyPatch):
@@ -605,7 +722,6 @@ async def test_doctor_parses_report_and_checks(api: SandboxAPI):
 
     assert route.called
     assert route.calls.last.request.headers["Authorization"] == "Bearer t-test"
-    assert isinstance(report, DoctorReport)
     assert report.ok is True
     assert report.active_provider == "aws"
     assert report.tailscale_enabled is True
@@ -661,11 +777,6 @@ async def test_doctor_401_raises_sandbox_auth_error(api: SandboxAPI):
 
     with pytest.raises(SandboxAuthError, match="service token required"):
         await api.doctor()
-
-
-# ---------------------------------------------------------------------------
-# HTTP proxies
-# ---------------------------------------------------------------------------
 
 
 @respx.mock

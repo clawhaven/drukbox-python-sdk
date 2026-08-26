@@ -26,6 +26,13 @@ Usage::
         await sandbox.delete_host(host.id)
         await sandbox.aclose()
 
+Templates bake a setup script into a reusable image; hosts fork from it::
+
+    template = await sandbox.create_template(setup_script=script)
+    while template.status == "building":
+        template = await sandbox.get_template(template.id)
+    host = await sandbox.create_host(template=template.id)
+
 For env-backed config use :meth:`SandboxAPI.from_env`.
 """
 
@@ -56,22 +63,6 @@ _SANDBOX_HTTP_LIMITS = httpx.Limits(
     max_connections=20,
     max_keepalive_connections=5,
 )
-
-
-class _Unset:
-    """Sentinel distinguishing an omitted argument from an explicit ``None``.
-
-    ``create_host`` mirrors the service's tri-state ``expires_at``: an
-    omitted field means "default lease", an explicit ``null`` means
-    "permanent". A plain ``datetime | None`` default can't tell those two
-    apart, so the omitted case uses this sentinel.
-    """
-
-    def __repr__(self) -> str:
-        return "UNSET"
-
-
-_UNSET = _Unset()
 
 
 @dataclass(frozen=True)
@@ -115,6 +106,29 @@ class SandboxHost:
     updated_at: str
     activated_at: str | None
     expires_at: str | None
+
+
+@dataclass(frozen=True)
+class SandboxTemplate:
+    """Snapshot of a reusable sandbox template as returned by the service.
+
+    ``status`` moves from ``"building"`` to ``"available"`` or
+    ``"failed"``. While the build runs, ``image`` is empty. A failed
+    build carries its reason in ``last_error``. The record has no
+    ``setup_script`` because the service never echoes it back.
+    """
+
+    id: str
+    provider: str
+    base_image: str
+    setup_script_hash: str
+    label: str
+    image: str
+    status: str
+    last_error: str
+    created_at: str
+    updated_at: str
+    last_used_at: str | None
 
 
 @dataclass(frozen=True)
@@ -215,20 +229,18 @@ class SandboxAPI:
         timeout = float(os.environ.get(f"{prefix}SERVICE_TIMEOUT", "300"))
         return cls(base_url=url, token=token, timeout=timeout)
 
-    # ------------------------------------------------------------------
-    # Host lifecycle
-    # ------------------------------------------------------------------
-
     async def create_host(
         self,
         *,
         disk_gb: int | None = None,
         env: dict[str, str] | None = None,
-        expires_at: datetime | None | _Unset = _UNSET,
+        expires_at: datetime | None = None,
         idempotency_key: str | None = None,
         image: str | None = None,
         instance_type: str | None = None,
+        permanent: bool = False,
         provider: str | None = None,
+        template: uuid.UUID | str | None = None,
     ) -> SandboxHost:
         """Provision a new host.
 
@@ -248,45 +260,53 @@ class SandboxAPI:
         use the service default. An unknown provider raises
         :class:`SandboxResponseError` (the service rejects it with 400).
 
+        ``template`` names a template by its ID, from
+        :meth:`create_template` or :meth:`get_template`. An explicit
+        ``image`` wins when you pass both. A template that is not
+        ``available`` raises :class:`SandboxConflictError`. An unknown
+        ID raises :class:`SandboxResponseError`.
+
         ``instance_type`` (provider-native size, e.g. ``t3.xlarge`` /
         ``cx33``) and ``disk_gb`` (root disk size) pin the VM shape; omit
         either to use the provider's configured default. A size the active
         provider can't serve raises :class:`SandboxResponseError` (400).
 
-        Lease (mirrors the wire contract's tri-state ``expires_at``): omit
-        it for the service's default lease, pass a ``datetime`` for an
-        explicit expiry, or pass ``None`` for a never-reaped (permanent)
-        host — exactly as an omitted field vs. an explicit ``null`` behave
-        on the API.
+        Lease: omit ``expires_at`` for the service's default lease, pass a
+        ``datetime`` for an explicit expiry, or pass ``permanent=True`` for
+        a host the janitor never reaps.
         """
+
+        if expires_at and permanent:
+            raise ValueError("a permanent host cannot carry an expires_at")
 
         payload: dict[str, Any] = {}
         if disk_gb is not None:
             payload["disk_gb"] = disk_gb
         if env is not None:
             payload["env"] = env
-        # Sentinel default lets us tell "caller omitted expires_at" (default
-        # lease) from "caller passed None" (explicit null → permanent host).
-        if not isinstance(expires_at, _Unset):
-            payload["expires_at"] = None if expires_at is None else expires_at.isoformat()
+        if expires_at:
+            payload["expires_at"] = expires_at.isoformat()
+        if permanent:
+            # An explicit null on the wire is the opt-out from expiry.
+            payload["expires_at"] = None
         if image is not None:
             payload["image"] = image
         if instance_type is not None:
             payload["instance_type"] = instance_type
         if provider is not None:
             payload["provider"] = provider
+        if template is not None:
+            payload["template"] = str(template)
 
         headers: dict[str, str] = {}
         if idempotency_key is not None:
             headers["Idempotency-Key"] = idempotency_key
 
         data = await self._request("POST", "/hosts", json=payload, headers=headers)
-        assert isinstance(data, dict)
         return SandboxHost(**data)
 
     async def get_host(self, host_id: uuid.UUID | str) -> SandboxHost:
         data = await self._request("GET", f"/hosts/{host_id}")
-        assert isinstance(data, dict)
         return SandboxHost(**data)
 
     async def attach(self, host_id: uuid.UUID | str) -> SandboxHost:
@@ -303,7 +323,6 @@ class SandboxAPI:
 
     async def list_hosts(self) -> list[SandboxHost]:
         data = await self._request("GET", "/hosts")
-        assert isinstance(data, list)
         return [SandboxHost(**item) for item in data]
 
     async def renew_host(
@@ -327,11 +346,60 @@ class SandboxAPI:
         if expires_at is not None:
             payload["expires_at"] = expires_at.isoformat()
         data = await self._request("POST", f"/hosts/{host_id}/renew", json=payload)
-        assert isinstance(data, dict)
         return SandboxHost(**data)
 
     async def delete_host(self, host_id: uuid.UUID | str) -> None:
         await self._request("DELETE", f"/hosts/{host_id}")
+
+    async def create_template(
+        self,
+        *,
+        setup_script: str,
+        provider: str | None = None,
+        base_image: str | None = None,
+        label: str | None = None,
+    ) -> SandboxTemplate:
+        """Start a template build and return immediately.
+
+        The service responds 202 with ``status="building"``. Poll
+        :meth:`get_template` until the status becomes ``"available"`` or
+        ``"failed"``. A failed record carries the reason in
+        ``last_error``. A repeated post with the same provider, base
+        image, and setup script returns the existing record without a
+        rebuild.
+        """
+
+        payload: dict[str, Any] = {"setup_script": setup_script}
+        if provider is not None:
+            payload["provider"] = provider
+        if base_image is not None:
+            payload["base_image"] = base_image
+        if label is not None:
+            payload["label"] = label
+
+        data = await self._request("POST", "/templates", json=payload)
+        return SandboxTemplate(**data)
+
+    async def get_template(self, template_id: uuid.UUID | str) -> SandboxTemplate:
+        """Fetch one template. Callers poll this after :meth:`create_template`."""
+
+        data = await self._request("GET", f"/templates/{template_id}")
+        return SandboxTemplate(**data)
+
+    async def list_templates(self) -> list[SandboxTemplate]:
+        """List templates newest first."""
+
+        data = await self._request("GET", "/templates")
+        return [SandboxTemplate(**item) for item in data]
+
+    async def delete_template(self, template_id: uuid.UUID | str) -> None:
+        """Delete a template.
+
+        A template whose status is ``building`` raises
+        :class:`SandboxConflictError`.
+        """
+
+        await self._request("DELETE", f"/templates/{template_id}")
 
     async def doctor(self) -> DoctorReport:
         """Fetch ``GET /doctor`` — read-only dependency health.
@@ -341,17 +409,12 @@ class SandboxAPI:
         """
 
         data = await self._request("GET", "/doctor")
-        assert isinstance(data, dict)
         return DoctorReport(
             ok=data["ok"],
             active_provider=data["active_provider"],
             tailscale_enabled=data["tailscale_enabled"],
             checks=[DoctorCheck(**check) for check in data["checks"]],
         )
-
-    # ------------------------------------------------------------------
-    # HTTP proxies
-    # ------------------------------------------------------------------
 
     async def create_http_proxy(
         self,
@@ -371,7 +434,6 @@ class SandboxAPI:
 
         payload: dict[str, Any] = {"name": name, "target": target, "headers": headers}
         data = await self._request("POST", "/http-proxies", json=payload)
-        assert isinstance(data, dict)
         return HTTPProxy(**data)
 
     async def delete_http_proxy(self, name: str) -> None:
@@ -393,7 +455,6 @@ class SandboxAPI:
         """
 
         data = await self._request("POST", f"/http-proxies/{name}/hosts/{host_id}")
-        assert isinstance(data, dict)
         return HTTPProxyAttachment(**data)
 
     async def detach_http_proxy(self, name: str, host_id: uuid.UUID | str) -> None:
@@ -403,15 +464,10 @@ class SandboxAPI:
         await self._request("DELETE", f"/http-proxies/{name}/hosts/{host_id}")
 
     async def aclose(self) -> None:
-        if self._client is None:
-            return
-        await self._client.aclose()
-        self._client = None
-        self._client_loop = None
-
-    # ------------------------------------------------------------------
-    # Internals
-    # ------------------------------------------------------------------
+        if self._client:
+            await self._client.aclose()
+            self._client = None
+            self._client_loop = None
 
     async def _request(
         self,
@@ -420,13 +476,13 @@ class SandboxAPI:
         *,
         headers: dict[str, str] | None = None,
         json: dict[str, Any] | None = None,
-    ) -> dict[str, Any] | list[Any]:
+    ) -> Any:
         client = await self._get_client()
         request_headers = {
             "Authorization": f"Bearer {self.token}",
             "Accept": "application/json",
         }
-        if headers is not None:
+        if headers:
             request_headers.update(headers)
 
         try:
@@ -466,9 +522,8 @@ class SandboxAPI:
         if response.status_code == 422:
             # FastAPI's 422 detail is a list of error dicts; join the messages
             # so it reads as a line, not a raw list repr.
-            detail = json_response.get("detail", "validation error")
-            if isinstance(detail, list):
-                detail = "; ".join(item.get("msg", "") for item in detail) or "validation error"
+            errors = json_response.get("detail") or []
+            detail = "; ".join(error.get("msg", "") for error in errors) or "validation error"
             raise SandboxValidationError(detail)
 
         if response.status_code >= 400:
@@ -477,20 +532,16 @@ class SandboxAPI:
 
     async def _get_client(self) -> httpx.AsyncClient:
         running_loop = asyncio.get_running_loop()
-        # Fast-path: client exists and is bound to the current loop.
-        if self._client is not None and self._client_loop is running_loop:
+        if self._client and self._client_loop is running_loop:
             return self._client
-        # Slow-path: either no client yet, or the client is bound to a
-        # stale loop (e.g. fixture teardown). Serialize through the
-        # lock.
-        if self._client_lock is None:
+        if not self._client_lock:
             self._client_lock = asyncio.Lock()
         async with self._client_lock:
             # Re-check under the lock; another coroutine may have raced
             # ahead.
-            if self._client is not None and self._client_loop is running_loop:
+            if self._client and self._client_loop is running_loop:
                 return self._client
-            if self._client is not None:
+            if self._client:
                 # Stale-loop client: closing on its own loop is unsafe,
                 # so drop the reference and rely on GC. httpx will emit
                 # an "unclosed client" warning, which is the correct

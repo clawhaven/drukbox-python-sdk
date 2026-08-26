@@ -11,6 +11,7 @@ from .api import (
     HTTPProxyAttachment,
     SandboxAPI,
     SandboxHost,
+    SandboxTemplate,
 )
 from .exceptions import (
     SandboxAPIError,
@@ -36,6 +37,7 @@ __all__ = [
     "SandboxNotFoundError",
     "SandboxProvisioningError",
     "SandboxResponseError",
+    "SandboxTemplate",
     "SandboxUnavailableError",
     "SandboxValidationError",
 ]
