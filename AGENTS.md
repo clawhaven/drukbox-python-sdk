@@ -25,11 +25,32 @@ object is a sandbox host.
 
 ```text
 src/drukbox_sdk/
-  api.py          # SandboxAPI, records, parsers, HTTP request handling
+  api.py          # SandboxAPI, records (SandboxHost, Secret, Issuer, ...), HTTP request handling
   exceptions.py   # SDK exception hierarchy
   __init__.py     # Public exports
 tests/
   test_api.py     # respx-backed SDK contract tests
+```
+
+## Secrets on create_host
+
+`create_host(secrets=...)` maps a service name to a `Secret`, a value the
+caller holds, or an `Issuer`, a URL the service fetches the value from. Both
+are frozen records. Only the fields a caller sets go on the wire, and the
+response carries no secret. A custom service names its `host` and
+`credential_var` as keywords.
+
+```python
+host = await sandbox.create_host(
+    secrets={
+        "anthropic": Issuer(
+            "https://mint.example/box-1/anthropic",
+            headers={"Authorization": "Bearer ..."},
+            refresh="1h",
+        ),
+        "openai": Secret("sk-..."),
+    },
+)
 ```
 
 ## Development Commands

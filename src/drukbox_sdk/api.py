@@ -39,7 +39,7 @@ For env-backed config use :meth:`SandboxAPI.from_env`.
 import asyncio
 import os
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Self
 
@@ -106,6 +106,64 @@ class SandboxHost:
     updated_at: str
     activated_at: str | None
     expires_at: str | None
+
+
+# A secret names a service the service knows, or a custom service of its own
+# with these fields. Only the fields a caller sets go on the wire. An empty
+# prefix is set: it means no prefix before the credential.
+SERVICE_FIELDS = ("host", "credential_var", "credential_header", "credential_prefix")
+
+
+def _service(record: "Secret | Issuer") -> dict[str, Any]:
+    fields = {name: getattr(record, name) for name in SERVICE_FIELDS}
+    return {name: value for name, value in fields.items() if value is not None}
+
+
+@dataclass(frozen=True)
+class Secret:
+    """A credential the caller holds.
+
+    The box never sees ``value``. It gets a placeholder in the variable the
+    service defines, and the service swaps it on the way out. For a custom
+    service, one the service does not know, name its ``host`` and
+    ``credential_var``. ``credential_header`` and ``credential_prefix``
+    default to a bearer token in ``Authorization``. The record's ``repr``
+    never shows the value.
+    """
+
+    value: str = field(repr=False)
+    host: str | None = field(default=None, kw_only=True)
+    credential_var: str | None = field(default=None, kw_only=True)
+    credential_header: str | None = field(default=None, kw_only=True)
+    credential_prefix: str | None = field(default=None, kw_only=True)
+
+    def entry(self) -> dict[str, Any]:
+        return {**_service(self), "value": self.value}
+
+
+@dataclass(frozen=True)
+class Issuer:
+    """A credential the service fetches from ``url`` when it needs it.
+
+    The service sends ``headers`` with each fetch and expects
+    ``{"value": ..., "expires_at": ...}`` back. ``refresh`` is the lifetime
+    of an answer without ``expires_at``, such as ``"1h"``. The URL must use
+    HTTPS. The custom service fields are the same as on :class:`Secret`. The
+    record's ``repr`` never shows the headers, which carry the issuer's
+    credential.
+    """
+
+    url: str
+    headers: dict[str, str] = field(repr=False)
+    refresh: str
+    host: str | None = field(default=None, kw_only=True)
+    credential_var: str | None = field(default=None, kw_only=True)
+    credential_header: str | None = field(default=None, kw_only=True)
+    credential_prefix: str | None = field(default=None, kw_only=True)
+
+    def entry(self) -> dict[str, Any]:
+        issuer = {"url": self.url, "headers": dict(self.headers), "refresh": self.refresh}
+        return {**_service(self), "issuer": issuer}
 
 
 @dataclass(frozen=True)
@@ -240,6 +298,7 @@ class SandboxAPI:
         instance_type: str | None = None,
         permanent: bool = False,
         provider: str | None = None,
+        secrets: dict[str, Secret | Issuer] | None = None,
         template: uuid.UUID | str | None = None,
     ) -> SandboxHost:
         """Provision a new host.
@@ -274,6 +333,13 @@ class SandboxAPI:
         Lease: omit ``expires_at`` for the service's default lease, pass a
         ``datetime`` for an explicit expiry, or pass ``permanent=True`` for
         a host the janitor never reaps.
+
+        ``secrets`` maps a service name to a :class:`Secret` or an
+        :class:`Issuer`. The box gets a placeholder per entry, never the
+        value, and the response carries no secret. A service the service
+        cannot serve raises :class:`SandboxValidationError` (422). A
+        deployment without the secrets proxy configured raises
+        :class:`SandboxConflictError` (409).
         """
 
         if expires_at and permanent:
@@ -295,6 +361,8 @@ class SandboxAPI:
             payload["instance_type"] = instance_type
         if provider is not None:
             payload["provider"] = provider
+        if secrets is not None:
+            payload["secrets"] = {name: entry.entry() for name, entry in secrets.items()}
         if template is not None:
             payload["template"] = str(template)
 
